@@ -765,54 +765,116 @@ function buildMixedFrameBridgeScript(): string {
   return `
 <script>
   (function () {
+    let reportScheduled = false;
     const schedule = () => {
-      if (typeof window.__th_ufb_reportSize === 'function') {
-        try {
-          window.__th_ufb_reportSize();
-        } catch {}
+      if (reportScheduled) return;
+      reportScheduled = true;
+      requestAnimationFrame(() => {
+        reportScheduled = false;
+        if (typeof window.__th_ufb_reportSize === 'function') {
+          try {
+            window.__th_ufb_reportSize();
+          } catch {}
+        }
+      });
+    };
+
+    const measureFrame = frame => {
+      const doc = frame.contentDocument;
+      if (!doc) return 0;
+      const de = doc.documentElement;
+      const body = doc.body;
+      return Math.max(
+        de ? de.scrollHeight : 0,
+        body ? body.scrollHeight : 0,
+        de ? de.offsetHeight : 0,
+        body ? body.offsetHeight : 0,
+        de ? de.clientHeight : 0
+      );
+    };
+
+    const applyFrameSize = frame => {
+      let nextHeight = 0;
+      try {
+        nextHeight = measureFrame(frame);
+      } catch {}
+      if (!Number.isFinite(nextHeight) || nextHeight <= 0) return;
+
+      const normalizedHeight = Math.max(180, Math.ceil(nextHeight));
+      const currentHeight = parseFloat(frame.style.height || '0') || 0;
+      if (Math.abs(normalizedHeight - currentHeight) > 1) {
+        frame.style.height = normalizedHeight + 'px';
+        schedule();
       }
     };
 
-    const resizeFrame = frame => {
+    const scheduleFrameResize = frame => {
+      if (frame.dataset.thUfbResizeQueued === '1') return;
+      frame.dataset.thUfbResizeQueued = '1';
+      requestAnimationFrame(() => {
+        frame.dataset.thUfbResizeQueued = '0';
+        applyFrameSize(frame);
+      });
+    };
+
+    const bindInnerResizeObserver = frame => {
       try {
+        if (frame.__thUfbResizeObserver) return;
         const doc = frame.contentDocument;
         if (!doc) return;
-        const de = doc.documentElement;
-        const body = doc.body;
-        const nextHeight = Math.max(
-          de ? de.scrollHeight : 0,
-          body ? body.scrollHeight : 0,
-          de ? de.offsetHeight : 0,
-          body ? body.offsetHeight : 0,
-          de ? de.clientHeight : 0
-        );
-        if (Number.isFinite(nextHeight) && nextHeight > 0) {
-          frame.style.height = Math.max(180, Math.ceil(nextHeight)) + 'px';
-          schedule();
-        }
+        const observer = new ResizeObserver(() => scheduleFrameResize(frame));
+        if (doc.documentElement) observer.observe(doc.documentElement);
+        if (doc.body) observer.observe(doc.body);
+        frame.__thUfbResizeObserver = observer;
+      } catch {}
+    };
 
-        try {
-          const observer = new MutationObserver(() => {
-            resizeFrame(frame);
-          });
-          observer.observe(doc.documentElement, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            characterData: true
-          });
-        } catch {}
+    const bindInnerMutationFallback = frame => {
+      try {
+        if (window.ResizeObserver || frame.__thUfbMutationObserver) return;
+        const doc = frame.contentDocument;
+        if (!doc || !doc.documentElement) return;
+        const observer = new MutationObserver(() => scheduleFrameResize(frame));
+        observer.observe(doc.documentElement, {
+          childList: true,
+          subtree: false,
+          attributes: true
+        });
+        frame.__thUfbMutationObserver = observer;
+      } catch {}
+    };
+
+    const bindFrame = frame => {
+      try {
+        bindInnerResizeObserver(frame);
+        bindInnerMutationFallback(frame);
+        scheduleFrameResize(frame);
       } catch {}
     };
 
     const bindFrames = () => {
       document.querySelectorAll('.th-ufb-mixed-frame').forEach(frame => {
-        if (frame.dataset.thUfbBound === '1') return;
-        frame.dataset.thUfbBound = '1';
-        frame.addEventListener('load', () => resizeFrame(frame));
-        setTimeout(() => resizeFrame(frame), 60);
-        setTimeout(() => resizeFrame(frame), 220);
-        setTimeout(() => resizeFrame(frame), 800);
+        if (frame.dataset.thUfbBound !== '1') {
+          frame.dataset.thUfbBound = '1';
+          frame.addEventListener('load', () => {
+            if (frame.__thUfbResizeObserver) {
+              try {
+                frame.__thUfbResizeObserver.disconnect();
+              } catch {}
+              frame.__thUfbResizeObserver = null;
+            }
+            if (frame.__thUfbMutationObserver) {
+              try {
+                frame.__thUfbMutationObserver.disconnect();
+              } catch {}
+              frame.__thUfbMutationObserver = null;
+            }
+            bindFrame(frame);
+          });
+        }
+        bindFrame(frame);
+        setTimeout(() => bindFrame(frame), 80);
+        setTimeout(() => bindFrame(frame), 320);
       });
       schedule();
     };
@@ -824,10 +886,9 @@ function buildMixedFrameBridgeScript(): string {
     }
 
     try {
-      const observer = new MutationObserver(bindFrames);
+      const observer = new MutationObserver(() => schedule());
       observer.observe(document.documentElement, {
-        childList: true,
-        subtree: true
+        childList: true
       });
     } catch {}
   })();
@@ -982,16 +1043,15 @@ function executeMessageRules(contentSource: Extract<FloatingBallContentSource, {
 
   if (contentSource.outputMode === 'html' && enabledRules.length === 0) {
     try {
-      const renderedHtml = retrieveDisplayedMessage(message.message_id).html()?.trim() ?? '';
-      const fallbackHtml = formatAsDisplayedMessage(rawMessage, { message_id: message.message_id }).trim();
-      const html = renderedHtml || fallbackHtml;
+      const renderedHtml = formatAsDisplayedMessage(rawMessage, { message_id: message.message_id }).trim();
+      const html = renderTavernHtmlBlocksAsIframes(renderedHtml, theme).trim();
       if (html) {
         segments = [html];
       } else if (!rawMessage) {
         segments = [];
       }
     } catch (error) {
-      warnings.push(`读取楼层显示内容失败，已回退到原始消息：${error instanceof Error ? error.message : String(error)}`);
+      warnings.push(`格式化楼层显示内容失败，已回退到原始消息：${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -1453,6 +1513,12 @@ function buildPreviewBridgeScript(scriptId: string): string {
       }
 
       if (!window.__th_ufb_reportSize) {
+        let lastReportedWidth = 0;
+        let lastReportedHeight = 0;
+        let lastReportedViewportWidth = 0;
+        let lastReportedViewportHeight = 0;
+        let reportQueued = false;
+
         window.__th_ufb_reportSize = function () {
           try {
             const doc = document;
@@ -1472,6 +1538,22 @@ function buildPreviewBridgeScript(scriptId: string): string {
               body ? body.offsetHeight : 0,
               de ? de.clientHeight : 0
             );
+            const viewportWidth = de ? de.clientWidth : 0;
+            const viewportHeight = de ? de.clientHeight : 0;
+
+            if (
+              Math.abs(scrollWidth - lastReportedWidth) <= 1 &&
+              Math.abs(scrollHeight - lastReportedHeight) <= 1 &&
+              Math.abs(viewportWidth - lastReportedViewportWidth) <= 1 &&
+              Math.abs(viewportHeight - lastReportedViewportHeight) <= 1
+            ) {
+              return;
+            }
+
+            lastReportedWidth = scrollWidth;
+            lastReportedHeight = scrollHeight;
+            lastReportedViewportWidth = viewportWidth;
+            lastReportedViewportHeight = viewportHeight;
 
             parentWin.postMessage(
               {
@@ -1479,8 +1561,8 @@ function buildPreviewBridgeScript(scriptId: string): string {
                 scriptId: ${JSON.stringify(scriptId)},
                 width: scrollWidth,
                 height: scrollHeight,
-                vw: de ? de.clientWidth : 0,
-                vh: de ? de.clientHeight : 0
+                vw: viewportWidth,
+                vh: viewportHeight
               },
               '*'
             );
@@ -1488,16 +1570,19 @@ function buildPreviewBridgeScript(scriptId: string): string {
         };
 
         const schedule = function () {
+          if (reportQueued) return;
+          reportQueued = true;
+          const flush = function () {
+            reportQueued = false;
+            try {
+              window.__th_ufb_reportSize();
+            } catch {}
+          };
           try {
-            window.__th_ufb_reportSize();
-          } catch {}
-          try {
-            parentWin.requestAnimationFrame(function () {
-              try {
-                window.__th_ufb_reportSize();
-              } catch {}
-            });
-          } catch {}
+            requestAnimationFrame(flush);
+          } catch {
+            setTimeout(flush, 50);
+          }
         };
 
         if (document.readyState === 'loading') {
@@ -1511,9 +1596,15 @@ function buildPreviewBridgeScript(scriptId: string): string {
           observer.observe(document.documentElement, {
             childList: true,
             subtree: true,
-            attributes: true,
-            characterData: true
+            attributes: false,
+            characterData: false
           });
+        } catch {}
+
+        try {
+          const resizeObserver = new ResizeObserver(schedule);
+          resizeObserver.observe(document.documentElement);
+          if (document.body) resizeObserver.observe(document.body);
         } catch {}
 
         try {
@@ -1564,7 +1655,7 @@ function buildPreviewBridgeScript(scriptId: string): string {
 function buildContentThemeStyle(theme?: ContentTheme): string {
   const backgroundColor = normalizeThemeColor(theme?.backgroundColor, DEFAULT_CONTENT_BACKGROUND_COLOR);
   const textColor = normalizeThemeColor(theme?.textColor, DEFAULT_CONTENT_TEXT_COLOR);
-  return `<style>:root{--th-ufb-content-bg:${backgroundColor};--th-ufb-content-text:${textColor};}html,body{margin:0;min-height:100%;background:var(--th-ufb-content-bg) !important;color:var(--th-ufb-content-text) !important;}body{box-sizing:border-box;padding-inline:1em;color:var(--th-ufb-content-text) !important;}</style>`;
+  return `<style>:root{--th-ufb-content-bg:${backgroundColor};--th-ufb-content-text:${textColor};}html,body{margin:0;min-height:100%;background:var(--th-ufb-content-bg) !important;color:var(--th-ufb-content-text) !important;}body{box-sizing:border-box;padding-inline:1em;color:var(--th-ufb-content-text) !important;}q{quotes:none;}q::before,q::after{content:"";}</style>`;
 }
 
 function getItemContentTheme(item: Pick<FloatingBallItem, 'contentBackgroundColor' | 'contentTextColor'>): ContentTheme {
@@ -2338,28 +2429,6 @@ class UniversalFloatingBallApp {
   line-height:1.55;
   color:#fff;
   background:rgba(11,15,25,0.92);
-}
-.th-ufb-preview-rendered{
-  min-height:240px;
-  padding:14px;
-  box-sizing:border-box;
-  background:rgba(11,15,25,0.96);
-  color:#fff;
-  overflow:auto;
-  -webkit-overflow-scrolling:touch;
-}
-.th-ufb-preview-rendered .mes_text{
-  max-width:none;
-  width:auto;
-  color:#fff;
-}
-.th-ufb-preview-rendered .mes_text,
-.th-ufb-preview-rendered .mes_text p,
-.th-ufb-preview-rendered .mes_text span,
-.th-ufb-preview-rendered .mes_text div,
-.th-ufb-preview-rendered .mes_text li,
-.th-ufb-preview-rendered .mes_text blockquote{
-  color:#fff !important;
 }
 .th-ufb-segment-list{
   display:flex;
@@ -3930,6 +3999,7 @@ class UniversalFloatingBallApp {
     modal.panel.append(resizeHandle);
 
     if (options.enableBridgeSizing) {
+      let lastAppliedIframeHeight = 0;
       const resizeFromMessage = (event: MessageEvent<PreviewSizeMessage>) => {
         const payload = event.data;
         if (!payload || payload.__th_ufb !== SIZE_MESSAGE_FLAG) {
@@ -3959,7 +4029,11 @@ class UniversalFloatingBallApp {
         }
 
         if (Number.isFinite(iframeHeight) && iframeHeight > 0) {
-          iframe.style.height = `${clamp(Math.round(iframeHeight), PREVIEW_MIN_HEIGHT, maxHeight)}px`;
+          const nextHeight = clamp(Math.round(iframeHeight), PREVIEW_MIN_HEIGHT, maxHeight);
+          if (Math.abs(nextHeight - lastAppliedIframeHeight) > 1 || Math.abs(nextHeight - (parseFloat(iframe.style.height || '0') || 0)) > 1) {
+            iframe.style.height = `${nextHeight}px`;
+            lastAppliedIframeHeight = nextHeight;
+          }
         }
       };
       this.hostWindow.addEventListener('message', resizeFromMessage);
@@ -4126,29 +4200,6 @@ class UniversalFloatingBallApp {
     cleanupIframeControls = this.attachIframePreviewControls(modal, iframe, { enableBridgeSizing: true });
   }
 
-  private renderDisplayedMessagePreview(messageId: number, target: HTMLElement, theme?: ContentTheme): boolean {
-    try {
-      const $displayed = retrieveDisplayedMessage(messageId);
-      if (!$displayed.length) {
-        return false;
-      }
-
-      const $clone = $displayed.clone(true, true);
-      const wrapper = this.hostDocument.createElement('div');
-      wrapper.className = 'th-ufb-preview-rendered';
-      if (theme) {
-        wrapper.style.background = normalizeThemeColor(theme.backgroundColor, DEFAULT_CONTENT_BACKGROUND_COLOR);
-        wrapper.style.color = normalizeThemeColor(theme.textColor, DEFAULT_CONTENT_TEXT_COLOR);
-      }
-      wrapper.append($clone[0]);
-      target.append(wrapper);
-      return true;
-    } catch (error) {
-      console.warn(`[${SCRIPT_NAME}] renderDisplayedMessagePreview failed`, error);
-      return false;
-    }
-  }
-
   private openMessageRulesPreview(item: FloatingBallItem): void {
     if (item.contentSource.mode !== 'message_rules') {
       return;
@@ -4241,10 +4292,6 @@ class UniversalFloatingBallApp {
         text.textContent = activeTab.content;
         placeholder.append(strong, text);
         contentCard.append(placeholder);
-        return;
-      }
-
-      if (activeTab.kind === 'html' && enabledRules.length === 0 && this.renderDisplayedMessagePreview(result.messageId, contentCard, theme)) {
         return;
       }
 

@@ -87,6 +87,13 @@ type ExportArchiveCollector = {
   size: () => number;
   download: () => Promise<void>;
 };
+type ExportArchiveBundle = {
+  addFile: (dirPath: string, filename: string, data: Blob | string) => void;
+  hasFile: (dirPath: string, filename: string) => boolean;
+  size: () => number;
+  packageCount: () => number;
+  downloadAll: () => Promise<{ packageCount: number; fileCount: number }>;
+};
 
 async function readDirHandle(
   handle: FileSystemDirectoryHandleLike,
@@ -929,7 +936,7 @@ function normalizeExportError(error: unknown) {
 }
 
 let hasShownExportDownloadFallbackToast = false;
-let activeExportArchive: ExportArchiveCollector | null = null;
+let activeExportArchive: ExportArchiveBundle | null = null;
 const ZIP_UTF8_FLAG = 0x0800;
 const ZIP_CRC32_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -1084,6 +1091,53 @@ function createExportArchiveCollector(downloadName: string): ExportArchiveCollec
     async download() {
       const blob = await buildZipBlob(Array.from(entries.values()));
       triggerDownload(blob, `${sanitizeFilename(downloadName)}.zip`);
+    },
+  };
+}
+
+function getExportArchiveGroupName(dirPath: string) {
+  const normalized = normalizePath(dirPath || '').replace(/^\/+|\/+$/g, '');
+  return normalized.split('/').filter(Boolean)[0] || '资源';
+}
+
+function createGroupedExportArchiveBundle(timestamp: string): ExportArchiveBundle {
+  const collectors = new Map<string, ExportArchiveCollector>();
+
+  const getCollector = (dirPath: string) => {
+    const groupName = sanitizeFilename(getExportArchiveGroupName(dirPath));
+    let collector = collectors.get(groupName);
+    if (!collector) {
+      collector = createExportArchiveCollector(`${groupName}_${timestamp}`);
+      collectors.set(groupName, collector);
+    }
+    return collector;
+  };
+
+  return {
+    addFile(dirPath, filename, data) {
+      getCollector(dirPath).addFile(dirPath, filename, data);
+    },
+    hasFile(dirPath, filename) {
+      const groupName = sanitizeFilename(getExportArchiveGroupName(dirPath));
+      return collectors.get(groupName)?.hasFile(dirPath, filename) ?? false;
+    },
+    size() {
+      return Array.from(collectors.values()).reduce((sum, collector) => sum + collector.size(), 0);
+    },
+    packageCount() {
+      return Array.from(collectors.values()).filter(collector => collector.size() > 0).length;
+    },
+    async downloadAll() {
+      let fileCount = 0;
+      let packageCount = 0;
+      for (const collector of collectors.values()) {
+        const count = collector.size();
+        if (count <= 0) continue;
+        await collector.download();
+        fileCount += count;
+        packageCount++;
+      }
+      return { packageCount, fileCount };
     },
   };
 }
@@ -3191,9 +3245,7 @@ export const useImportStore = defineStore('resource-importer', () => {
     try {
       const targets = entries.value.filter(e => selectedIds.value.has(e.id) && e.status === 'pending');
       const useMobileZip = shouldUseMobileZipExport(targets);
-      const archive = useMobileZip
-        ? createExportArchiveCollector(`资源导出_${targets.length}项_${formatFilenameTimestamp()}`)
-        : null;
+      const archive = useMobileZip ? createGroupedExportArchiveBundle(formatFilenameTimestamp()) : null;
       const ext = targets.filter(t => t.type === 'extension_url');
       const others = targets.filter(t => t.type !== 'extension_url');
       if (archive) activeExportArchive = archive;
@@ -3207,8 +3259,8 @@ export const useImportStore = defineStore('resource-importer', () => {
         activeExportArchive = null;
       }
       if (archive && archive.size() > 0) {
-        await archive.download();
-        toastr.success(`手机端已将 ${archive.size()} 个文件打包为 zip 下载`);
+        const result = await archive.downloadAll();
+        toastr.success(`手机端已按资源类型打包下载 ${result.packageCount} 个 zip（共 ${result.fileCount} 个文件）`);
       }
       selectedIds.value = new Set();
       buildOperationResult('导出结果', targets);
@@ -3222,14 +3274,26 @@ export const useImportStore = defineStore('resource-importer', () => {
     if (!isExportMode.value) return;
     isProcessing.value = true;
     try {
-      const ext = entries.value.filter(e => e.status === 'pending' && e.type === 'extension_url');
-      const others = entries.value.filter(e => e.status === 'pending' && e.type !== 'extension_url');
+      const pendingTargets = entries.value.filter(e => e.status === 'pending');
+      const useMobileZip = shouldUseMobileZipExport(pendingTargets);
+      const archive = useMobileZip ? createGroupedExportArchiveBundle(formatFilenameTimestamp()) : null;
+      const ext = pendingTargets.filter(e => e.type === 'extension_url');
+      const others = pendingTargets.filter(e => e.type !== 'extension_url');
       const targets = [...ext, ...others];
-      if (ext.length > 0) {
-        await exportExtensionTxt(ext);
-        updateStats();
+      if (archive) activeExportArchive = archive;
+      try {
+        if (ext.length > 0) {
+          await exportExtensionTxt(ext);
+          updateStats();
+        }
+        for (const item of others) await exportSingle(item);
+      } finally {
+        activeExportArchive = null;
       }
-      for (const item of others) await exportSingle(item);
+      if (archive && archive.size() > 0) {
+        const result = await archive.downloadAll();
+        toastr.success(`手机端已按资源类型打包下载 ${result.packageCount} 个 zip（共 ${result.fileCount} 个文件）`);
+      }
       buildOperationResult('导出结果', targets);
     } finally {
       isProcessing.value = false;
