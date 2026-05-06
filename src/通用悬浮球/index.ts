@@ -7,7 +7,8 @@ import App from './App.vue';
 type ToastLevel = 'success' | 'info' | 'warning' | 'error';
 type BallStatus = 'active' | 'hidden';
 type RegexRuleMode = 'extract_first' | 'extract_all' | 'replace';
-type FloatingBallOutputMode = 'html' | 'text' | 'url';
+type RegexRuleRenderMode = 'inherit' | 'text' | 'html';
+type FloatingBallOutputMode = 'html' | 'text' | 'url' | 'mixed';
 
 type FloatingBallSettings = {
   left: number;
@@ -18,11 +19,17 @@ type FloatingBallSettings = {
   size: number;
 };
 
+type ContentTheme = {
+  backgroundColor: string;
+  textColor: string;
+};
+
 type RegexRule = {
   id: string;
   name: string;
   enabled: boolean;
   mode: RegexRuleMode;
+  renderMode: RegexRuleRenderMode;
   pattern: string;
   flags: string;
   replacement: string;
@@ -55,6 +62,8 @@ type FloatingBallItem = {
   name: string;
   status: BallStatus;
   webCode: string;
+  contentBackgroundColor: string;
+  contentTextColor: string;
   floatingBall: FloatingBallSettings;
   contentSource: FloatingBallContentSource;
 };
@@ -123,6 +132,8 @@ type MessageRulesSuccessResult = {
   rawMessage: string;
   segments: string[];
   warnings: string[];
+  mixedPreviewHtml?: string;
+  replacementCount?: number;
 };
 
 type MessageRulesFailureResult = {
@@ -166,6 +177,8 @@ const BALL_DEFAULT_SIZE = 44;
 const BALL_DEFAULT_COLOR = '#7c5cff';
 const BALL_DEFAULT_TEXT = '网页';
 const DEFAULT_MESSAGE_TARGET = '-1';
+const DEFAULT_CONTENT_BACKGROUND_COLOR = '#0f172a';
+const DEFAULT_CONTENT_TEXT_COLOR = '#ffffff';
 const BALL_PADDING = 10;
 const BALL_DEFAULT_MARGIN = 14;
 const BALL_STACK_GAP = 12;
@@ -190,6 +203,7 @@ const DEFAULT_REGEX_RULE: RegexRule = {
   name: '新规则',
   enabled: true,
   mode: 'extract_first',
+  renderMode: 'inherit',
   pattern: '',
   flags: '',
   replacement: '',
@@ -214,6 +228,7 @@ const RegexRuleSchema = z
     name: z.string().default(DEFAULT_REGEX_RULE.name),
     enabled: z.boolean().default(DEFAULT_REGEX_RULE.enabled),
     mode: z.enum(['extract_first', 'extract_all', 'replace']).default(DEFAULT_REGEX_RULE.mode),
+    renderMode: z.enum(['inherit', 'text', 'html']).default(DEFAULT_REGEX_RULE.renderMode),
     pattern: z.string().default(DEFAULT_REGEX_RULE.pattern),
     flags: z.string().default(DEFAULT_REGEX_RULE.flags),
     replacement: z.string().default(DEFAULT_REGEX_RULE.replacement),
@@ -250,6 +265,11 @@ function isHexColor(value: string): boolean {
   return /^#[0-9a-fA-F]{3}$/.test(value) || /^#[0-9a-fA-F]{6}$/.test(value);
 }
 
+function normalizeThemeColor(value: unknown, fallback: string): string {
+  const color = String(value ?? '').trim();
+  return isHexColor(color) ? color : fallback;
+}
+
 function createBallId(): string {
   return `ball-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -265,6 +285,7 @@ function createRegexRule(partial?: Partial<RegexRule>): RegexRule {
     name: String(parsed.name ?? DEFAULT_REGEX_RULE.name),
     enabled: Boolean(parsed.enabled),
     mode: parsed.mode,
+    renderMode: parsed.renderMode,
     pattern: String(parsed.pattern ?? ''),
     flags: String(parsed.flags ?? ''),
     replacement: String(parsed.replacement ?? ''),
@@ -340,6 +361,7 @@ function createRuleFromTavernRegex(templateId: string): RegexRule | null {
   return createRegexRule({
     name: template.name,
     mode: 'replace',
+    renderMode: 'inherit',
     pattern: template.pattern,
     flags: template.flags,
     replacement: template.replacement,
@@ -363,7 +385,9 @@ function normalizeContentSource(value: unknown): FloatingBallContentSource {
 
   const rules = Array.isArray(raw.rules) ? raw.rules.map((rule: unknown) => normalizeRegexRule(rule)) : [];
   const outputMode: FloatingBallOutputMode =
-    raw.outputMode === 'text' || raw.outputMode === 'url' || raw.outputMode === 'html' ? raw.outputMode : 'html';
+    raw.outputMode === 'text' || raw.outputMode === 'url' || raw.outputMode === 'html' || raw.outputMode === 'mixed'
+      ? raw.outputMode
+      : 'html';
 
   return {
     mode: 'message_rules',
@@ -381,6 +405,9 @@ function getStatusLabel(status: BallStatus): string {
 }
 
 function getOutputModeLabel(outputMode: FloatingBallOutputMode): string {
+  if (outputMode === 'mixed') {
+    return '混合渲染';
+  }
   if (outputMode === 'text') {
     return '文本';
   }
@@ -398,6 +425,16 @@ function getRuleModeLabel(mode: RegexRuleMode): string {
     return '替换';
   }
   return '提取首个';
+}
+
+function getRuleRenderModeLabel(mode: RegexRuleRenderMode): string {
+  if (mode === 'html') {
+    return '网页';
+  }
+  if (mode === 'text') {
+    return '文本';
+  }
+  return '原样并入';
 }
 
 function getItemContentSummary(item: FloatingBallItem): string {
@@ -428,11 +465,7 @@ function buildRegex(rule: RegexRule, forceGlobal = false): RegExp {
   return new RegExp(rule.pattern, flags);
 }
 
-function applyExtractReplacement(match: RegExpExecArray, source: string, replacement: string): string {
-  if (!replacement) {
-    return match[0] ?? '';
-  }
-
+function applyReplacementTemplate(match: RegExpExecArray, source: string, replacement: string): string {
   const groups = match.groups ?? {};
   return replacement.replace(/\$(\$|&|`|'|[0-9]{1,2}|<[^>]+>)/g, (_, token: string) => {
     if (token === '$') {
@@ -458,7 +491,372 @@ function applyExtractReplacement(match: RegExpExecArray, source: string, replace
   });
 }
 
-function executeMessageRules(contentSource: Extract<FloatingBallContentSource, { mode: 'message_rules' }>): MessageRulesResult {
+function applyExtractReplacement(match: RegExpExecArray, source: string, replacement: string): string {
+  if (!replacement) {
+    return match[0] ?? '';
+  }
+  return applyReplacementTemplate(match, source, replacement);
+}
+
+function applyStringReplacement(match: RegExpExecArray, source: string, replacement: string): string {
+  if (!replacement) {
+    return '';
+  }
+  return applyReplacementTemplate(match, source, replacement);
+}
+
+function escapeHtml(value: string): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return escapeHtml(value).replace(/\r?\n/g, '&#10;');
+}
+
+function escapeRegExp(value: string): string {
+  return String(value ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function unwrapHtmlCodeFence(value: string): string {
+  const raw = String(value ?? '').trim();
+  const match = raw.match(/^```(?:html)?\s*([\s\S]*?)\s*```$/i);
+  return match ? String(match[1] ?? '').trim() : raw;
+}
+
+function createMixedReplacementToken(index: number): string {
+  return `TH_UFB_SLOT_${index}_${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+}
+
+function unwrapMixedReplacementCodeFences(
+  message: string,
+  replacements: Array<{ token: string; renderMode: Exclude<RegexRuleRenderMode, 'inherit'> }>,
+): string {
+  let normalized = String(message ?? '');
+  for (const replacement of replacements) {
+    if (replacement.renderMode !== 'html') {
+      continue;
+    }
+    const escapedToken = escapeRegExp(replacement.token);
+    const fencedBlockPattern = new RegExp(
+      String.raw`(?:^|\r?\n)[ \t]*\`\`\`[^\r\n]*\r?\n[ \t]*(${escapedToken})[ \t]*\r?\n[ \t]*\`\`\`(?=\r?\n|$)`,
+      'g',
+    );
+    normalized = normalized.replace(fencedBlockPattern, (_, token: string) => `\n\n${token}\n\n`);
+  }
+  return normalized;
+}
+
+const MIXED_RENDER_ALLOWED_HTML_TAGS = new Set([
+  'a',
+  'abbr',
+  'b',
+  'blockquote',
+  'br',
+  'code',
+  'details',
+  'div',
+  'em',
+  'hr',
+  'i',
+  'img',
+  'li',
+  'ol',
+  'p',
+  'pre',
+  'strong',
+  'summary',
+  'table',
+  'tbody',
+  'td',
+  'th',
+  'thead',
+  'tr',
+  'u',
+  'ul',
+]);
+
+function stripCustomXmlLikeTagsForMixedRender(message: string): string {
+  const lines = String(message ?? '').split(/\r?\n/);
+  const normalizedLines = lines.map(line => {
+    const trimmed = line.trim();
+    const pureTagMatch = trimmed.match(/^<\/?([a-z][\w:-]*)\b[^>]*>$/i);
+    if (pureTagMatch) {
+      const tagName = String(pureTagMatch[1] ?? '').toLowerCase();
+      if (!MIXED_RENDER_ALLOWED_HTML_TAGS.has(tagName)) {
+        return '';
+      }
+      return line;
+    }
+
+    return line.replace(/<\/?([a-z][\w:-]*)\b[^>]*>/gi, (full, rawTagName: string) => {
+      const tagName = String(rawTagName ?? '').toLowerCase();
+      return MIXED_RENDER_ALLOWED_HTML_TAGS.has(tagName) ? full : '';
+    });
+  });
+
+  return normalizedLines.join('\n');
+}
+
+function buildInlinePreviewDocument(html: string, theme?: ContentTheme): string {
+  const code = unwrapHtmlCodeFence(html);
+  if (!code) {
+    return '';
+  }
+
+  const looksLikeFullDoc = /<!doctype/i.test(code) || /<\s*html[\s>]/i.test(code) || /<\s*head[\s>]/i.test(code);
+  if (looksLikeFullDoc) {
+    return injectPreviewBridge(code, theme);
+  }
+
+  return [
+    '<!doctype html>',
+    '<html>',
+    '  <head>',
+    '    <meta charset="utf-8" />',
+    '    <meta name="viewport" content="width=device-width, initial-scale=1" />',
+    `    ${buildContentThemeStyle(theme)}`,
+    '    <style>',
+    '      .th-ufb-inline-fragment{white-space:pre-wrap;word-break:break-word;}',
+    '    </style>',
+    '  </head>',
+    '  <body>',
+    `    <div class="th-ufb-inline-fragment">${code}</div>`,
+    '  </body>',
+    '</html>',
+  ].join('\n');
+}
+
+function buildMixedReplacementMarkup(renderMode: RegexRuleRenderMode, content: string, index: number, theme?: ContentTheme): string {
+  if (renderMode === 'html') {
+    const inlineHtml = buildInlinePreviewDocument(content, theme);
+    if (!inlineHtml) {
+      return '<span class="th-ufb-mixed-text is-empty">HTML 替换结果为空。</span>';
+    }
+    return [
+      `<span class="th-ufb-mixed-html" data-slot-index="${index}" style="display:block;width:100%;margin:12px 0;">`,
+      `  <iframe class="th-ufb-mixed-frame" frameborder="0" scrolling="no" style="display:block;width:100%;min-height:360px;border:0;background:transparent;overflow:hidden;" srcdoc="${escapeHtmlAttribute(inlineHtml)}"></iframe>`,
+      '</span>',
+    ].join('\n');
+  }
+
+  return `<span class="th-ufb-mixed-text">${escapeHtml(content)}</span>`;
+}
+
+function buildMixedMessageHtml(
+  renderedHtml: string,
+  replacements: Array<{ token: string; renderMode: Exclude<RegexRuleRenderMode, 'inherit'>; content: string }>,
+  theme?: ContentTheme,
+): string {
+  const template = document.createElement('template');
+  template.innerHTML = String(renderedHtml ?? '');
+
+  const replaceElement = (element: Element, markup: string) => {
+    const replacementTemplate = document.createElement('template');
+    replacementTemplate.innerHTML = markup;
+    element.replaceWith(replacementTemplate.content);
+  };
+
+  const replaceTextTokens = (token: string, markup: string) => {
+    const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
+    const nodes: Text[] = [];
+    let current = walker.nextNode();
+    while (current) {
+      nodes.push(current as Text);
+      current = walker.nextNode();
+    }
+
+    for (const node of nodes) {
+      const text = node.nodeValue ?? '';
+      if (!text.includes(token)) {
+        continue;
+      }
+
+      const fragment = document.createDocumentFragment();
+      const parts = text.split(token);
+      parts.forEach((part, index) => {
+        if (part) {
+          fragment.append(document.createTextNode(part));
+        }
+        if (index < parts.length - 1) {
+          const replacementTemplate = document.createElement('template');
+          replacementTemplate.innerHTML = markup;
+          fragment.append(replacementTemplate.content.cloneNode(true));
+        }
+      });
+      node.replaceWith(fragment);
+    }
+  };
+
+  for (const [index, replacement] of replacements.entries()) {
+    const markup = buildMixedReplacementMarkup(replacement.renderMode, replacement.content, index, theme);
+    const renderedBlock = Array.from(template.content.querySelectorAll('.TH-render, pre')).find(element =>
+      (element.textContent ?? '').includes(replacement.token),
+    );
+
+    if (renderedBlock) {
+      replaceElement(renderedBlock, markup);
+      continue;
+    }
+
+    replaceTextTokens(replacement.token, markup);
+  }
+
+  return template.innerHTML;
+}
+
+function renderTavernHtmlBlocksAsIframes(renderedHtml: string, theme?: ContentTheme): string {
+  const template = document.createElement('template');
+  template.innerHTML = String(renderedHtml ?? '');
+  const blocks = Array.from(template.content.querySelectorAll('.TH-render, pre')).filter(element => {
+    if (element.classList.contains('TH-render')) {
+      return true;
+    }
+    return Boolean(element.querySelector('code.custom-html, code.custom-language-html'));
+  });
+
+  blocks.forEach((element, index) => {
+    const code = element.querySelector('code')?.textContent ?? element.textContent ?? '';
+    const replacementTemplate = document.createElement('template');
+    replacementTemplate.innerHTML = buildMixedReplacementMarkup('html', code, index, theme);
+    element.replaceWith(replacementTemplate.content);
+  });
+
+  return template.innerHTML;
+}
+
+function buildMixedFrameBridgeStyle(): string {
+  return `
+<style>
+  .th-ufb-mixed-root{
+    display:block;
+    white-space:pre-wrap;
+    word-break:break-word;
+  }
+  .th-ufb-mixed-text{
+    white-space:pre-wrap;
+    word-break:break-word;
+  }
+  .th-ufb-mixed-text.is-empty{
+    color:rgba(255,255,255,0.72);
+    font-style:italic;
+  }
+  .th-ufb-mixed-html{
+    display:block;
+    width:100%;
+    margin:12px 0;
+  }
+  .th-ufb-mixed-frame{
+    display:block;
+    width:100%;
+    min-height:360px;
+    border:0;
+    background:transparent;
+    overflow:hidden;
+  }
+</style>`.trim();
+}
+
+function buildMixedFrameBridgeScript(): string {
+  return `
+<script>
+  (function () {
+    const schedule = () => {
+      if (typeof window.__th_ufb_reportSize === 'function') {
+        try {
+          window.__th_ufb_reportSize();
+        } catch {}
+      }
+    };
+
+    const resizeFrame = frame => {
+      try {
+        const doc = frame.contentDocument;
+        if (!doc) return;
+        const de = doc.documentElement;
+        const body = doc.body;
+        const nextHeight = Math.max(
+          de ? de.scrollHeight : 0,
+          body ? body.scrollHeight : 0,
+          de ? de.offsetHeight : 0,
+          body ? body.offsetHeight : 0,
+          de ? de.clientHeight : 0
+        );
+        if (Number.isFinite(nextHeight) && nextHeight > 0) {
+          frame.style.height = Math.max(180, Math.ceil(nextHeight)) + 'px';
+          schedule();
+        }
+
+        try {
+          const observer = new MutationObserver(() => {
+            resizeFrame(frame);
+          });
+          observer.observe(doc.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            characterData: true
+          });
+        } catch {}
+      } catch {}
+    };
+
+    const bindFrames = () => {
+      document.querySelectorAll('.th-ufb-mixed-frame').forEach(frame => {
+        if (frame.dataset.thUfbBound === '1') return;
+        frame.dataset.thUfbBound = '1';
+        frame.addEventListener('load', () => resizeFrame(frame));
+        setTimeout(() => resizeFrame(frame), 60);
+        setTimeout(() => resizeFrame(frame), 220);
+        setTimeout(() => resizeFrame(frame), 800);
+      });
+      schedule();
+    };
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', bindFrames, { once: true });
+    } else {
+      bindFrames();
+    }
+
+    try {
+      const observer = new MutationObserver(bindFrames);
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true
+      });
+    } catch {}
+  })();
+</script>`.trim();
+}
+
+function injectMixedPreviewBridge(html: string, theme?: ContentTheme): string {
+  const mixedStyle = buildMixedFrameBridgeStyle();
+  const mixedScript = buildMixedFrameBridgeScript();
+  return injectPreviewBridge(
+    [
+      '<!doctype html>',
+      '<html>',
+      '  <head>',
+      '    <meta charset="utf-8" />',
+      '    <meta name="viewport" content="width=device-width, initial-scale=1" />',
+      `    ${mixedStyle}`,
+      '  </head>',
+      '  <body>',
+      `    <div class="th-ufb-mixed-root">${html}</div>`,
+      `    ${mixedScript}`,
+      '  </body>',
+      '</html>',
+    ].join('\n'),
+    theme,
+  );
+}
+
+function executeMessageRules(contentSource: Extract<FloatingBallContentSource, { mode: 'message_rules' }>, theme?: ContentTheme): MessageRulesResult {
   const messageTarget = String(contentSource.messageTarget ?? '').trim();
   if (!messageTarget) {
     return { ok: false, messageTarget, error: '请填写目标楼层。' };
@@ -488,6 +886,98 @@ function executeMessageRules(contentSource: Extract<FloatingBallContentSource, {
   const enabledRules = contentSource.rules.filter(rule => rule.enabled);
   if (!rawMessage) {
     warnings.push('目标楼层原始消息为空。');
+  }
+
+  if (contentSource.outputMode === 'mixed') {
+    const unsupportedRule = enabledRules.find(rule => rule.mode !== 'replace');
+    if (unsupportedRule) {
+      return {
+        ok: false,
+        messageTarget,
+        error: `混合渲染仅支持替换规则，规则“${unsupportedRule.name.trim() || '未命名规则'}”当前为 ${getRuleModeLabel(unsupportedRule.mode)}。`,
+      };
+    }
+
+    let renderedMessage = rawMessage;
+    const mixedReplacements: Array<{ token: string; renderMode: Exclude<RegexRuleRenderMode, 'inherit'>; content: string }> = [];
+
+    const replaceWithResolver = (
+      source: string,
+      regex: RegExp,
+      resolver: (match: RegExpExecArray, segment: string) => string,
+    ): string => {
+      let output = '';
+      let cursor = 0;
+      regex.lastIndex = 0;
+
+      let match = regex.exec(source);
+      while (match) {
+        const matchIndex = match.index ?? 0;
+        const matchText = match[0] ?? '';
+        output += source.slice(cursor, matchIndex);
+        output += resolver(match, source);
+        cursor = matchIndex + matchText.length;
+
+        if (!regex.global) {
+          break;
+        }
+        if (matchText === '') {
+          regex.lastIndex += 1;
+        }
+        match = regex.exec(source);
+      }
+
+      output += source.slice(cursor);
+      return output;
+    };
+
+    for (const rule of enabledRules) {
+      try {
+        const regex = buildRegex(rule);
+        if (rule.renderMode === 'inherit') {
+          renderedMessage = renderedMessage.replace(regex, rule.replacement);
+          continue;
+        }
+
+        renderedMessage = replaceWithResolver(renderedMessage, regex, (match, segment) => {
+          const token = createMixedReplacementToken(mixedReplacements.length);
+          const content = applyStringReplacement(match, segment, rule.replacement);
+          mixedReplacements.push({
+            token,
+            renderMode: rule.renderMode,
+            content,
+          });
+          return rule.renderMode === 'html' ? `\n\n\`\`\`html\n${token}\n\`\`\`\n\n` : token;
+        });
+      } catch (error) {
+        return {
+          ok: false,
+          messageTarget,
+          error: `规则“${rule.name.trim() || '未命名规则'}”执行失败：${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+
+    let renderedHtml = '';
+    try {
+      renderedHtml = formatAsDisplayedMessage(renderedMessage, { message_id: message.message_id }).trim();
+    } catch (error) {
+      warnings.push(`格式化混合渲染内容失败，已回退到纯文本：${error instanceof Error ? error.message : String(error)}`);
+      renderedHtml = `<pre class="th-ufb-mixed-text">${escapeHtml(renderedMessage)}</pre>`;
+    }
+
+    const displayedHtml = buildMixedMessageHtml(renderedHtml, mixedReplacements, theme).trim();
+
+    return {
+      ok: true,
+      messageTarget,
+      messageId: message.message_id,
+      rawMessage,
+      segments: displayedHtml ? [displayedHtml] : [],
+      warnings,
+      mixedPreviewHtml: displayedHtml ? injectMixedPreviewBridge(displayedHtml, theme) : '',
+      replacementCount: mixedReplacements.length,
+    };
   }
 
   if (contentSource.outputMode === 'html' && enabledRules.length === 0) {
@@ -555,6 +1045,33 @@ function executeMessageRules(contentSource: Extract<FloatingBallContentSource, {
     }
   }
 
+  if (contentSource.outputMode === 'html' && enabledRules.length > 0 && enabledRules.every(rule => rule.mode === 'replace')) {
+    const hasRenderableReplacement = enabledRules.some(rule => rule.renderMode === 'html' || rule.renderMode === 'text');
+    segments = segments.map(segment => {
+      try {
+        let renderedHtml = formatAsDisplayedMessage(segment, { message_id: message.message_id }).trim();
+        renderedHtml = renderTavernHtmlBlocksAsIframes(renderedHtml, theme).trim();
+        if (!hasRenderableReplacement) {
+          return renderedHtml;
+        }
+
+        const replacements = enabledRules
+          .filter((rule): rule is RegexRule & { renderMode: Exclude<RegexRuleRenderMode, 'inherit'> } => rule.renderMode !== 'inherit')
+          .map((rule, index) => ({
+            token: rule.renderMode === 'html' ? unwrapHtmlCodeFence(rule.replacement) : rule.replacement,
+            renderMode: rule.renderMode,
+            content: rule.replacement,
+            index,
+          }));
+
+        return buildMixedMessageHtml(renderedHtml, replacements, theme).trim();
+      } catch (error) {
+        warnings.push(`格式化替换后的消息失败，已保留替换文本：${error instanceof Error ? error.message : String(error)}`);
+        return segment;
+      }
+    });
+  }
+
   return {
     ok: true,
     messageTarget,
@@ -596,11 +1113,12 @@ function buildPreviewTabItems(outputMode: FloatingBallOutputMode, segments: stri
   }
 
   return segments.map((segment, index) => {
-    const shouldRenderAsText = outputMode === 'text' || (outputMode === 'html' && !looksLikeHtmlMarkup(segment));
+    const shouldRenderAsText =
+      outputMode === 'text' || ((outputMode === 'html' || outputMode === 'mixed') && !looksLikeHtmlMarkup(segment));
     return {
       key: `${outputMode}-${index}`,
       label: `${shouldRenderAsText ? '文本' : '片段'} ${index + 1}`,
-      kind: shouldRenderAsText ? 'text' : outputMode,
+      kind: shouldRenderAsText ? 'text' : outputMode === 'mixed' ? 'html' : outputMode,
       content: segment,
     };
   });
@@ -649,6 +1167,8 @@ function createBallItem(partial?: Partial<FloatingBallItem> & { id?: string; nam
     name,
     status,
     webCode: String(partial?.webCode ?? ''),
+    contentBackgroundColor: normalizeThemeColor(partial?.contentBackgroundColor, DEFAULT_CONTENT_BACKGROUND_COLOR),
+    contentTextColor: normalizeThemeColor(partial?.contentTextColor, DEFAULT_CONTENT_TEXT_COLOR),
     floatingBall: normalizeFloatingBall(partial?.floatingBall ?? DEFAULT_FLOATING_BALL),
     contentSource: normalizeContentSource(partial?.contentSource),
   };
@@ -661,6 +1181,8 @@ function normalizeBallItem(value: unknown, fallbackId: string, fallbackName: str
     name: String(raw.name ?? fallbackName).trim() || fallbackName,
     status: raw.status === 'hidden' || raw.status === 'archived' ? 'hidden' : 'active',
     webCode: String(raw.webCode ?? ''),
+    contentBackgroundColor: normalizeThemeColor(raw.contentBackgroundColor, DEFAULT_CONTENT_BACKGROUND_COLOR),
+    contentTextColor: normalizeThemeColor(raw.contentTextColor, DEFAULT_CONTENT_TEXT_COLOR),
     floatingBall: raw.floatingBall as FloatingBallSettings | undefined,
     contentSource: raw.contentSource as FloatingBallContentSource | undefined,
   });
@@ -1039,14 +1561,30 @@ function buildPreviewBridgeScript(scriptId: string): string {
 </script>`.trim();
 }
 
-function injectPreviewBridge(html: string): string {
+function buildContentThemeStyle(theme?: ContentTheme): string {
+  const backgroundColor = normalizeThemeColor(theme?.backgroundColor, DEFAULT_CONTENT_BACKGROUND_COLOR);
+  const textColor = normalizeThemeColor(theme?.textColor, DEFAULT_CONTENT_TEXT_COLOR);
+  return `<style>:root{--th-ufb-content-bg:${backgroundColor};--th-ufb-content-text:${textColor};}html,body{margin:0;min-height:100%;background:var(--th-ufb-content-bg) !important;color:var(--th-ufb-content-text) !important;}body{box-sizing:border-box;padding-inline:1em;color:var(--th-ufb-content-text) !important;}</style>`;
+}
+
+function getItemContentTheme(item: Pick<FloatingBallItem, 'contentBackgroundColor' | 'contentTextColor'>): ContentTheme {
+  return {
+    backgroundColor: normalizeThemeColor(item.contentBackgroundColor, DEFAULT_CONTENT_BACKGROUND_COLOR),
+    textColor: normalizeThemeColor(item.contentTextColor, DEFAULT_CONTENT_TEXT_COLOR),
+  };
+}
+
+function injectPreviewBridge(html: string, theme?: ContentTheme): string {
   const code = String(html ?? '').trim();
   if (!code) {
     return '';
   }
 
-  const bridgeBaseStyle = '<style>html,body{margin:0;min-height:100%;background:transparent !important;}</style>';
-  const bridgeScript = buildPreviewBridgeScript(SCRIPT_ID);
+  const bridgeBaseStyle = [
+    buildContentThemeStyle(theme),
+    buildMixedFrameBridgeStyle(),
+  ].join('\n');
+  const bridgeScript = [buildPreviewBridgeScript(SCRIPT_ID), buildMixedFrameBridgeScript()].join('\n');
 
   const hasHtmlTag = /<\s*html[\s>]/i.test(code);
   const hasHeadOpenTag = /<\s*head[\s>]/i.test(code);
@@ -1081,7 +1619,7 @@ function injectPreviewBridge(html: string): string {
   ].join('\n');
 }
 
-function injectRulePreviewBridge(html: string): string {
+function injectRulePreviewBridge(html: string, theme?: ContentTheme): string {
   const code = String(html ?? '').trim();
   if (!code) {
     return '';
@@ -1089,7 +1627,7 @@ function injectRulePreviewBridge(html: string): string {
 
   const looksLikeFullDoc = /<!doctype/i.test(code) || /<\s*html[\s>]/i.test(code) || /<\s*head[\s>]/i.test(code);
   if (looksLikeFullDoc) {
-    return injectPreviewBridge(code);
+    return injectPreviewBridge(code, theme);
   }
 
   const fragmentStyle = `
@@ -1097,6 +1635,8 @@ function injectRulePreviewBridge(html: string): string {
   .th-ufb-rule-fragment{
     white-space:pre-wrap;
     word-break:break-word;
+    color:inherit;
+    background:transparent;
   }
 </style>
 `.trim();
@@ -1107,6 +1647,7 @@ function injectRulePreviewBridge(html: string): string {
     ['<!doctype html>', '<html>', '  <head>', '    <meta charset="utf-8" />', `    ${fragmentStyle}`, '  </head>', '  <body>', wrapped, '  </body>', '</html>'].join(
       '\n',
     ),
+    theme,
   );
 }
 
@@ -1464,6 +2005,7 @@ class UniversalFloatingBallApp {
 .${BUTTON_CLASS}:active{transform:scale(0.98)}
 .${PRIMARY_BUTTON_CLASS}{background:linear-gradient(145deg,#7c5cff 0%,#4d7dff 100%);border-color:transparent}
 .${GHOST_BUTTON_CLASS}{background:transparent}
+.th-ufb-btn--danger{background:rgba(239,68,68,0.2);color:#fecaca;border-color:rgba(248,113,113,0.28)}
 
 .th-ufb-status{
   display:inline-flex;
@@ -2166,6 +2708,9 @@ class UniversalFloatingBallApp {
       getStatusLabel,
       getOutputModeLabel,
       getRuleModeLabel,
+      getRuleRenderModeLabel,
+      defaultContentBackgroundColor: DEFAULT_CONTENT_BACKGROUND_COLOR,
+      defaultContentTextColor: DEFAULT_CONTENT_TEXT_COLOR,
       createBallItem,
       createRegexRule,
       listTavernRegexTemplates,
@@ -2863,6 +3408,7 @@ class UniversalFloatingBallApp {
       ['html', 'HTML'],
       ['text', '文本'],
       ['url', 'URL'],
+      ['mixed', '混合渲染'],
     ] as const) {
       const option = this.hostDocument.createElement('option');
       option.value = value;
@@ -2881,7 +3427,8 @@ class UniversalFloatingBallApp {
 
     const sectionHint = this.hostDocument.createElement('div');
     sectionHint.className = 'th-ufb-hint';
-    sectionHint.textContent = '规则按顺序逐条执行：提取首个 / 提取全部会改写段列表，替换会对现有每段做标准正则替换。关闭某条规则后会立即从规则链中跳过。';
+    sectionHint.textContent =
+      '规则按顺序逐条执行：提取首个 / 提取全部会改写段列表，替换会对现有每段做标准正则替换。混合渲染模式下建议只用替换规则，并为命中的替换结果指定网页或文本渲染。';
 
     const ruleList = this.hostDocument.createElement('div');
     ruleList.className = 'th-ufb-rule-list';
@@ -2951,7 +3498,7 @@ class UniversalFloatingBallApp {
       }
 
       const source = current.contentSource;
-      const result = executeMessageRules(source);
+      const result = executeMessageRules(source, getItemContentTheme(current));
       if (!result.ok) {
         this.renderPreviewPlaceholder(previewBody, '规则执行失败', result.error);
         return;
@@ -2970,7 +3517,12 @@ class UniversalFloatingBallApp {
       shell.className = 'th-ufb-preview-shell';
       const summary = this.hostDocument.createElement('div');
       summary.className = 'th-ufb-hint';
-      summary.textContent = `目标楼层 ${result.messageTarget} · 消息 ID ${result.messageId} · ${getOutputModeLabel(source.outputMode)} · ${result.segments.length} 段结果`;
+      summary.textContent =
+        source.outputMode === 'mixed'
+          ? `目标楼层 ${result.messageTarget} · 消息 ID ${result.messageId} · ${getOutputModeLabel(source.outputMode)} · ${
+              result.replacementCount ?? 0
+            } 个局部替换`
+          : `目标楼层 ${result.messageTarget} · 消息 ID ${result.messageId} · ${getOutputModeLabel(source.outputMode)} · ${result.segments.length} 段结果`;
       shell.append(summary);
 
       if (result.warnings.length > 0) {
@@ -2978,6 +3530,23 @@ class UniversalFloatingBallApp {
         warnings.className = 'th-ufb-hint';
         warnings.textContent = result.warnings.join(' ');
         shell.append(warnings);
+      }
+
+      if (source.outputMode === 'mixed') {
+        const block = this.hostDocument.createElement('div');
+        block.className = 'th-ufb-segment';
+        const title = this.hostDocument.createElement('div');
+        title.className = 'th-ufb-segment__title';
+        title.textContent = '混合渲染结果';
+        const meta = this.hostDocument.createElement('div');
+        meta.className = 'th-ufb-segment__meta';
+        meta.textContent = '点击悬浮球后会保留原消息显示，只在命中位置嵌入网页或文本块。';
+        const pre = this.hostDocument.createElement('pre');
+        pre.textContent = (result.segments[0] ?? '').slice(0, 1200) || '暂无预览内容';
+        block.append(title, meta, pre);
+        shell.append(block);
+        previewBody.append(shell);
+        return;
       }
 
       const segments = this.hostDocument.createElement('div');
@@ -3033,7 +3602,9 @@ class UniversalFloatingBallApp {
         title.textContent = rule.name.trim() || `规则 ${index + 1}`;
         const meta = this.hostDocument.createElement('div');
         meta.className = 'th-ufb-rule-card__meta';
-        meta.textContent = `${getRuleModeLabel(rule.mode)} · ${rule.enabled ? '已启用' : '已停用'}`;
+        meta.textContent = `${getRuleModeLabel(rule.mode)} · ${
+          rule.mode === 'replace' ? getRuleRenderModeLabel(rule.renderMode) : '片段'
+        } · ${rule.enabled ? '已启用' : '已停用'}`;
         headInfo.append(title, meta);
 
         const actions = this.hostDocument.createElement('div');
@@ -3041,7 +3612,7 @@ class UniversalFloatingBallApp {
 
         const toggleButton = this.hostDocument.createElement('button');
         toggleButton.type = 'button';
-        toggleButton.className = BUTTON_CLASS;
+        toggleButton.className = rule.enabled ? `${BUTTON_CLASS} th-ufb-btn--danger` : `${BUTTON_CLASS} ${PRIMARY_BUTTON_CLASS}`;
         toggleButton.textContent = rule.enabled ? '停用' : '启用';
         toggleButton.addEventListener('click', () => {
           rule.enabled = !rule.enabled;
@@ -3141,10 +3712,41 @@ class UniversalFloatingBallApp {
         modeSelect.value = rule.mode;
         modeSelect.addEventListener('change', () => {
           rule.mode = modeSelect.value as RegexRuleMode;
-          meta.textContent = `${getRuleModeLabel(rule.mode)} · ${rule.enabled ? '已启用' : '已停用'}`;
+          renderModeSelect.disabled = rule.mode !== 'replace';
+          meta.textContent = `${getRuleModeLabel(rule.mode)} · ${
+            rule.mode === 'replace' ? getRuleRenderModeLabel(rule.renderMode) : '片段'
+          } · ${rule.enabled ? '已启用' : '已停用'}`;
           renderImmediatePreview();
         });
         modeField.append(modeFieldLabel, modeSelect);
+
+        const renderModeField = this.hostDocument.createElement('div');
+        renderModeField.className = 'th-ufb-rule-field';
+        const renderModeLabel = this.hostDocument.createElement('label');
+        renderModeLabel.className = 'th-ufb-label';
+        renderModeLabel.textContent = '替换结果';
+        const renderModeSelect = this.hostDocument.createElement('select');
+        renderModeSelect.className = 'th-ufb-select';
+        for (const [value, label] of [
+          ['inherit', '原样并入'],
+          ['text', '文本'],
+          ['html', '网页'],
+        ] as const) {
+          const option = this.hostDocument.createElement('option');
+          option.value = value;
+          option.textContent = label;
+          renderModeSelect.append(option);
+        }
+        renderModeSelect.value = rule.renderMode;
+        renderModeSelect.disabled = rule.mode !== 'replace';
+        renderModeSelect.addEventListener('change', () => {
+          rule.renderMode = renderModeSelect.value as RegexRuleRenderMode;
+          meta.textContent = `${getRuleModeLabel(rule.mode)} · ${
+            rule.mode === 'replace' ? getRuleRenderModeLabel(rule.renderMode) : '片段'
+          } · ${rule.enabled ? '已启用' : '已停用'}`;
+          renderImmediatePreview();
+        });
+        renderModeField.append(renderModeLabel, renderModeSelect);
 
         const flagsField = this.hostDocument.createElement('div');
         flagsField.className = 'th-ufb-rule-field';
@@ -3192,7 +3794,7 @@ class UniversalFloatingBallApp {
         });
         replacementField.append(replacementLabel, replacementInput);
 
-        grid.append(nameField, modeField, flagsField, patternField, replacementField);
+        grid.append(nameField, modeField, renderModeField, flagsField, patternField, replacementField);
         card.append(head, grid);
         ruleList.append(card);
       });
@@ -3499,7 +4101,7 @@ class UniversalFloatingBallApp {
   }
 
   private openCustomHtmlPreview(item: FloatingBallItem): void {
-    const previewHtml = injectPreviewBridge(item.webCode);
+    const previewHtml = injectPreviewBridge(item.webCode, getItemContentTheme(item));
     if (!previewHtml) {
       showToast('info', `“${item.name}”还没有输入网页代码。`);
       return;
@@ -3524,7 +4126,7 @@ class UniversalFloatingBallApp {
     cleanupIframeControls = this.attachIframePreviewControls(modal, iframe, { enableBridgeSizing: true });
   }
 
-  private renderDisplayedMessagePreview(messageId: number, target: HTMLElement): boolean {
+  private renderDisplayedMessagePreview(messageId: number, target: HTMLElement, theme?: ContentTheme): boolean {
     try {
       const $displayed = retrieveDisplayedMessage(messageId);
       if (!$displayed.length) {
@@ -3534,6 +4136,10 @@ class UniversalFloatingBallApp {
       const $clone = $displayed.clone(true, true);
       const wrapper = this.hostDocument.createElement('div');
       wrapper.className = 'th-ufb-preview-rendered';
+      if (theme) {
+        wrapper.style.background = normalizeThemeColor(theme.backgroundColor, DEFAULT_CONTENT_BACKGROUND_COLOR);
+        wrapper.style.color = normalizeThemeColor(theme.textColor, DEFAULT_CONTENT_TEXT_COLOR);
+      }
       wrapper.append($clone[0]);
       target.append(wrapper);
       return true;
@@ -3548,7 +4154,8 @@ class UniversalFloatingBallApp {
       return;
     }
 
-    const result = executeMessageRules(item.contentSource);
+    const theme = getItemContentTheme(item);
+    const result = executeMessageRules(item.contentSource, theme);
     let cleanupIframeControls: (() => void) | null = null;
     const modal = this.createPreviewModal(() => {
       cleanupIframeControls?.();
@@ -3571,6 +4178,32 @@ class UniversalFloatingBallApp {
         result.warnings[0] ??
           `目标楼层 ${result.messageTarget} 没有产出可用于 ${getOutputModeLabel(item.contentSource.outputMode)} 预览的结果。`,
       );
+      return;
+    }
+
+    if (item.contentSource.outputMode === 'mixed') {
+      if (result.warnings.length > 0) {
+        const warning = this.hostDocument.createElement('div');
+        warning.className = 'th-ufb-hint';
+        warning.textContent = result.warnings.join(' ');
+        shell.append(warning);
+      }
+
+      if (!result.mixedPreviewHtml) {
+        this.renderPreviewPlaceholder(shell, '没有可预览的结果', '混合渲染没有生成可显示的内容。');
+        return;
+      }
+
+      const iframe = this.hostDocument.createElement('iframe');
+      iframe.className = 'th-ufb-iframe';
+      iframe.setAttribute('frameborder', '0');
+      iframe.setAttribute('srcdoc', result.mixedPreviewHtml);
+      iframe.style.height = '60svh';
+      const contentCard = this.hostDocument.createElement('div');
+      contentCard.className = 'th-ufb-preview-card';
+      contentCard.append(iframe);
+      shell.append(contentCard);
+      cleanupIframeControls = this.attachIframePreviewControls(modal, iframe, { enableBridgeSizing: true });
       return;
     }
 
@@ -3611,7 +4244,7 @@ class UniversalFloatingBallApp {
         return;
       }
 
-      if (activeTab.kind === 'html' && enabledRules.length === 0 && this.renderDisplayedMessagePreview(result.messageId, contentCard)) {
+      if (activeTab.kind === 'html' && enabledRules.length === 0 && this.renderDisplayedMessagePreview(result.messageId, contentCard, theme)) {
         return;
       }
 
@@ -3620,7 +4253,10 @@ class UniversalFloatingBallApp {
       iframe.setAttribute('frameborder', '0');
       iframe.style.height = '60svh';
       if (activeTab.kind === 'html') {
-        iframe.setAttribute('srcdoc', enabledRules.length > 0 ? injectRulePreviewBridge(activeTab.content) : injectPreviewBridge(activeTab.content));
+        iframe.setAttribute(
+          'srcdoc',
+          enabledRules.length > 0 ? injectRulePreviewBridge(activeTab.content, theme) : injectPreviewBridge(activeTab.content, theme),
+        );
       } else {
         iframe.setAttribute('src', activeTab.content);
       }

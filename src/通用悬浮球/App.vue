@@ -76,6 +76,34 @@
                 @input="updateCurrentWebCode(($event.target as HTMLTextAreaElement).value)"
               />
             </label>
+
+            <label class="ufb-field">
+              <span>网页背景色</span>
+              <div class="ufb-color-row">
+                <input :value="currentItem.contentBackgroundColor || props.api.defaultContentBackgroundColor" class="ufb-color" type="color" @input="updateCurrentContentBackgroundColor(($event.target as HTMLInputElement).value)" />
+                <input
+                  :value="currentItem.contentBackgroundColor || props.api.defaultContentBackgroundColor"
+                  type="text"
+                  class="ufb-input"
+                  :placeholder="props.api.defaultContentBackgroundColor"
+                  @input="updateCurrentContentBackgroundColor(($event.target as HTMLInputElement).value)"
+                />
+              </div>
+            </label>
+
+            <label class="ufb-field">
+              <span>网页字体色</span>
+              <div class="ufb-color-row">
+                <input :value="currentItem.contentTextColor || props.api.defaultContentTextColor" class="ufb-color" type="color" @input="updateCurrentContentTextColor(($event.target as HTMLInputElement).value)" />
+                <input
+                  :value="currentItem.contentTextColor || props.api.defaultContentTextColor"
+                  type="text"
+                  class="ufb-input"
+                  :placeholder="props.api.defaultContentTextColor"
+                  @input="updateCurrentContentTextColor(($event.target as HTMLInputElement).value)"
+                />
+              </div>
+            </label>
           </div>
         </section>
 
@@ -236,6 +264,48 @@
                   />
                 </label>
 
+                <label class="ufb-field">
+                  <span>输出模式</span>
+                  <select
+                    :value="messageSource.outputMode"
+                    class="ufb-input"
+                    @change="updateOutputMode(($event.target as HTMLSelectElement).value)"
+                  >
+                    <option value="html">HTML</option>
+                    <option value="text">文本</option>
+                    <option value="url">URL</option>
+                    <option value="mixed">混合渲染</option>
+                  </select>
+                </label>
+
+                <label class="ufb-field">
+                  <span>显示背景色</span>
+                  <div class="ufb-color-row">
+                    <input :value="currentItem.contentBackgroundColor || props.api.defaultContentBackgroundColor" class="ufb-color" type="color" @input="updateCurrentContentBackgroundColor(($event.target as HTMLInputElement).value)" />
+                    <input
+                      :value="currentItem.contentBackgroundColor || props.api.defaultContentBackgroundColor"
+                      type="text"
+                      class="ufb-input"
+                      :placeholder="props.api.defaultContentBackgroundColor"
+                      @input="updateCurrentContentBackgroundColor(($event.target as HTMLInputElement).value)"
+                    />
+                  </div>
+                </label>
+
+                <label class="ufb-field">
+                  <span>显示字体色</span>
+                  <div class="ufb-color-row">
+                    <input :value="currentItem.contentTextColor || props.api.defaultContentTextColor" class="ufb-color" type="color" @input="updateCurrentContentTextColor(($event.target as HTMLInputElement).value)" />
+                    <input
+                      :value="currentItem.contentTextColor || props.api.defaultContentTextColor"
+                      type="text"
+                      class="ufb-input"
+                      :placeholder="props.api.defaultContentTextColor"
+                      @input="updateCurrentContentTextColor(($event.target as HTMLInputElement).value)"
+                    />
+                  </div>
+                </label>
+
                 <div class="ufb-inline-actions">
                   <button class="ufb-btn ufb-btn--primary" type="button" @click="addRule">
                     新增规则
@@ -285,12 +355,21 @@
                   <div class="ufb-rule__head" :class="{ 'is-collapsed': isRuleCollapsed(rule.id) }">
                     <div class="ufb-rule__summary">
                       <div class="ufb-rule__title">{{ rule.name?.trim() || `规则 ${Number(index) + 1}` }}</div>
-                      <div v-if="!isRuleCollapsed(rule.id)" class="ufb-rule__meta">{{ props.api.getRuleModeLabel(rule.mode) }} · {{ rule.enabled ? '已启用' : '已停用' }}</div>
+                      <div v-if="!isRuleCollapsed(rule.id)" class="ufb-rule__meta">
+                        {{ props.api.getRuleModeLabel(rule.mode) }} · {{ rule.mode === 'replace' ? props.api.getRuleRenderModeLabel(rule.renderMode) : '片段' }} · {{ rule.enabled ? '已启用' : '已停用' }}
+                      </div>
                     </div>
                     <div class="ufb-inline-actions">
                       <button class="ufb-btn" type="button" @click="toggleRuleCollapsed(rule.id)">{{ isRuleCollapsed(rule.id) ? '展开' : '收起' }}</button>
                       <template v-if="!isRuleCollapsed(rule.id)">
-                        <button class="ufb-btn" type="button" @click="toggleRuleEnabled(Number(index))">{{ rule.enabled ? '停用' : '启用' }}</button>
+                        <button
+                          class="ufb-btn"
+                          :class="rule.enabled ? 'ufb-btn--danger' : 'ufb-btn--primary'"
+                          type="button"
+                          @click="toggleRuleEnabled(Number(index))"
+                        >
+                          {{ rule.enabled ? '停用' : '启用' }}
+                        </button>
                         <button class="ufb-btn" type="button" :disabled="Number(index) === 0" @click="moveRule(Number(index), -1)">上移</button>
                         <button class="ufb-btn" type="button" :disabled="Number(index) >= messageSource.rules.length - 1" @click="moveRule(Number(index), 1)">下移</button>
                         <button class="ufb-btn ufb-btn--danger" type="button" @click="removeRule(Number(index))">删除</button>
@@ -310,6 +389,20 @@
                         <option value="extract_first">提取首个</option>
                         <option value="extract_all">提取全部</option>
                         <option value="replace">替换</option>
+                      </select>
+                    </label>
+
+                    <label class="ufb-field">
+                      <span>替换结果</span>
+                      <select
+                        :value="rule.renderMode"
+                        class="ufb-input"
+                        :disabled="rule.mode !== 'replace'"
+                        @change="updateRuleField(Number(index), 'renderMode', ($event.target as HTMLSelectElement).value)"
+                      >
+                        <option value="inherit">原样并入</option>
+                        <option value="text">文本</option>
+                        <option value="html">网页</option>
                       </select>
                     </label>
 
@@ -357,6 +450,9 @@
                     <div class="ufb-segment__title">{{ previewState.summary }}</div>
                     <div v-if="previewState.warning" class="ufb-segment__meta">{{ previewState.warning }}</div>
                   </div>
+                  <div v-if="previewState.previewHint" class="ufb-segment">
+                    <div class="ufb-segment__meta">{{ previewState.previewHint }}</div>
+                  </div>
                   <div class="ufb-segment-list">
                     <div v-for="segment in previewState.segments" :key="segment.key" class="ufb-segment">
                       <div class="ufb-segment__title">{{ segment.title }}</div>
@@ -387,6 +483,9 @@ type ManagerApi = {
   getStatusLabel: (status: string) => string;
   getOutputModeLabel: (mode: string) => string;
   getRuleModeLabel: (mode: string) => string;
+  getRuleRenderModeLabel: (mode: string) => string;
+  defaultContentBackgroundColor: string;
+  defaultContentTextColor: string;
   createBallItem: (partial?: any) => any;
   createRegexRule: (partial?: any) => any;
   listTavernRegexTemplates: () => any[];
@@ -522,8 +621,6 @@ function ensureMessageSource(item: any) {
       outputMode: 'html',
       rules: [],
     };
-  } else {
-    item.contentSource.outputMode = 'html';
   }
   return item.contentSource;
 }
@@ -569,6 +666,18 @@ function updateCurrentWebCode(value: string) {
   }, '已修改网页代码，记得保存');
 }
 
+function updateCurrentContentBackgroundColor(value: string) {
+  withCurrentItem(item => {
+    item.contentBackgroundColor = value;
+  }, '已修改网页背景色，记得保存');
+}
+
+function updateCurrentContentTextColor(value: string) {
+  withCurrentItem(item => {
+    item.contentTextColor = value;
+  }, '已修改网页字体色，记得保存');
+}
+
 function updateCurrentSize(value: string | number) {
   withCurrentItem(item => {
     item.floatingBall.size = normalizeSize(value);
@@ -612,9 +721,6 @@ function switchToMessageRules() {
 const messageSource = computed(() => {
   if (!currentItem.value || currentItem.value.contentSource?.mode !== 'message_rules') {
     return null;
-  }
-  if (currentItem.value.contentSource.outputMode !== 'html') {
-    currentItem.value.contentSource.outputMode = 'html';
   }
   return currentItem.value.contentSource;
 });
@@ -663,6 +769,12 @@ function updateMessageTarget(value: string) {
   withMessageSource(source => {
     source.messageTarget = value;
   }, '已修改目标楼层，记得保存');
+}
+
+function updateOutputMode(value: string) {
+  withMessageSource(source => {
+    source.outputMode = value;
+  }, `已切换输出模式为 ${props.api.getOutputModeLabel(value)}`);
 }
 
 function addRule() {
@@ -760,7 +872,7 @@ function toggleRuleEnabled(index: number) {
   }, '已切换规则启用状态，记得保存');
 }
 
-function updateRuleField(index: number, key: 'name' | 'mode' | 'flags' | 'pattern' | 'replacement', value: string) {
+function updateRuleField(index: number, key: 'name' | 'mode' | 'renderMode' | 'flags' | 'pattern' | 'replacement', value: string) {
   withMessageSource(source => {
     const rule = source.rules[index];
     if (!rule) return;
@@ -805,12 +917,24 @@ const previewState = computed(() => {
 
   return {
     kind: 'segments' as const,
-    summary: `目标楼层 ${result.messageTarget} · 消息 ID ${result.messageId} · ${result.segments.length} 段结果`,
+    summary:
+      item.contentSource.outputMode === 'mixed'
+        ? `目标楼层 ${result.messageTarget} · 消息 ID ${result.messageId} · ${props.api.getOutputModeLabel(item.contentSource.outputMode)} · ${
+            result.replacementCount ?? 0
+          } 个局部替换`
+        : `目标楼层 ${result.messageTarget} · 消息 ID ${result.messageId} · ${result.segments.length} 段结果`,
     warning: result.warnings?.[0] ?? '',
+    previewHint:
+      item.contentSource.outputMode === 'mixed'
+        ? '点击悬浮球后会保留原消息显示，只在命中位置嵌入网页或文本块。'
+        : '',
     segments: result.segments.map((segment: string, index: number) => {
       return {
         key: `${index}-${segment.slice(0, 16)}`,
-        title: `片段 ${index + 1}`,
+        title:
+          item.contentSource.outputMode === 'mixed'
+            ? `混合结果 ${index + 1}`
+            : `片段 ${index + 1}`,
         meta: `${segment.length} 个字符`,
         content: segment.length > 1200 ? `${segment.slice(0, 1200)}…` : segment,
       };
@@ -1106,10 +1230,10 @@ const previewState = computed(() => {
   box-shadow:0 4px 10px rgba(15,23,42,0.35);
   transition:transform 0.2s ease;
 }
-.ufb-switch input:checked + .ufb-switch__track{
+.ufb-switch.is-on .ufb-switch__track{
   background:linear-gradient(135deg, #2563eb, #0f766e);
 }
-.ufb-switch input:checked + .ufb-switch__track .ufb-switch__thumb{
+.ufb-switch.is-on .ufb-switch__thumb{
   transform:translateX(22px);
 }
 .ufb-switch__text{
